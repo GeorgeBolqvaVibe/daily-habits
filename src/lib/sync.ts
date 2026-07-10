@@ -127,6 +127,21 @@ export async function pullRemote(userId: string): Promise<PullResult> {
   }
 }
 
+/** Hard-delete rows by id for this user (used when a habit is removed). */
+export async function deleteRemote(
+  userId: string,
+  table: 'habits' | 'challenges',
+  ids: string[],
+): Promise<boolean> {
+  if (!supabase || ids.length === 0) return true;
+  try {
+    const { error } = await supabase.from(table).delete().eq('user_id', userId).in('id', ids);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
 export async function pushLocal(userId: string, store: Store): Promise<boolean> {
   if (!supabase) return false;
   try {

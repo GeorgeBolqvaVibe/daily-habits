@@ -27,7 +27,7 @@ import {
   toggleBinary,
 } from './habits';
 import { syncReminders } from './notifications';
-import { mergeStores, pullRemote, pushLocal } from './sync';
+import { deleteRemote, mergeStores, pullRemote, pushLocal } from './sync';
 
 type HabitInput = {
   name: string;
@@ -77,6 +77,15 @@ export function HabitsProvider({ children }: { children: ReactNode }) {
   const scopeRef = useRef(scope);
   const pushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const skipNextPersist = useRef(true);
+  const storeRef = useRef(store);
+  const userIdRef = useRef(userId);
+
+  useEffect(() => {
+    storeRef.current = store;
+  }, [store]);
+  useEffect(() => {
+    userIdRef.current = userId;
+  }, [userId]);
 
   // Load (and, when signed in, sync) whenever the active scope changes.
   useEffect(() => {
@@ -174,14 +183,19 @@ export function HabitsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const removeHabit = useCallback((id: string) => {
-    const ts = nowIso();
+    const childIds = storeRef.current.challenges
+      .filter((c) => c.habitId === id)
+      .map((c) => c.id);
     setStore((s) => ({
       ...s,
-      habits: s.habits.map((h) => (h.id === id ? { ...h, deletedAt: ts, updatedAt: ts } : h)),
-      challenges: s.challenges.map((c) =>
-        c.habitId === id ? { ...c, deletedAt: ts, updatedAt: ts } : c,
-      ),
+      habits: s.habits.filter((h) => h.id !== id),
+      challenges: s.challenges.filter((c) => c.habitId !== id),
     }));
+    const uid = userIdRef.current;
+    if (uid) {
+      deleteRemote(uid, 'habits', [id]).catch(() => {});
+      deleteRemote(uid, 'challenges', childIds).catch(() => {});
+    }
   }, []);
 
   const toggleBinaryHabit = useCallback((id: string) => {
