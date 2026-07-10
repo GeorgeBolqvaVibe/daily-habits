@@ -30,9 +30,10 @@ yarn-error.*
 .DS_Store
 *.pem
 
-# local env files
+# local env files (but keep the committed template)
 .env
 .env.*
+!.env.example
 
 # dev artifacts
 expo-qr.png

@@ -9,20 +9,25 @@ import {
   useState,
 } from 'react';
 
+import { useAuth } from './auth';
 import {
   Challenge,
   Habit,
+  LOCAL_SCOPE,
   Store,
   bumpCount,
   challengeProgress,
+  emptyStore,
   loadStore,
   newChallenge,
   newHabit,
+  nowIso,
   saveStore,
   todayKey,
   toggleBinary,
 } from './habits';
 import { syncReminders } from './notifications';
+import { mergeStores, pullRemote, pushLocal } from './sync';
 
 type HabitInput = {
   name: string;
@@ -39,6 +44,7 @@ type HabitsContextValue = {
   onboardingComplete: boolean;
   notificationsAsked: boolean;
   activeChallenge: Challenge | null;
+  syncing: boolean;
   addHabit: (input: HabitInput) => Habit;
   updateHabit: (id: string, patch: Partial<HabitInput>) => void;
   removeHabit: (id: string) => void;
@@ -58,32 +64,85 @@ type HabitsContextValue = {
 
 const HabitsContext = createContext<HabitsContextValue | null>(null);
 
+const alive = <T extends { deletedAt: string | null }>(x: T) => !x.deletedAt;
+
 export function HabitsProvider({ children }: { children: ReactNode }) {
-  const [store, setStore] = useState<Store>({
-    habits: [],
-    challenges: [],
-    onboardingComplete: false,
-    notificationsAsked: false,
-  });
+  const { userId, loading: authLoading } = useAuth();
+  const scope = userId ?? LOCAL_SCOPE;
+
+  const [store, setStore] = useState<Store>(emptyStore());
   const [ready, setReady] = useState(false);
-  const firstRender = useRef(true);
+  const [syncing, setSyncing] = useState(false);
 
+  const scopeRef = useRef(scope);
+  const pushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const skipNextPersist = useRef(true);
+
+  // Load (and, when signed in, sync) whenever the active scope changes.
   useEffect(() => {
-    loadStore().then((s) => {
-      setStore(s);
-      setReady(true);
-    });
-  }, []);
+    if (authLoading) return;
+    let cancelled = false;
+    setReady(false);
+    scopeRef.current = scope;
+    skipNextPersist.current = true;
 
+    (async () => {
+      let local = await loadStore(scope);
+
+      // First time signing in: adopt anything created while offline/local.
+      if (scope !== LOCAL_SCOPE) {
+        const localOnly = await loadStore(LOCAL_SCOPE);
+        if (localOnly.habits.length || localOnly.challenges.length) {
+          local = mergeStores(local, {
+            habits: localOnly.habits,
+            challenges: localOnly.challenges,
+          });
+          local.onboardingComplete = local.onboardingComplete || localOnly.onboardingComplete;
+        }
+      }
+      if (cancelled) return;
+      setStore(local);
+      setReady(true);
+
+      if (userId) {
+        setSyncing(true);
+        const remote = await pullRemote(userId);
+        if (cancelled) {
+          setSyncing(false);
+          return;
+        }
+        const merged = mergeStores(local, remote);
+        await saveStore(merged, scope);
+        setStore(merged);
+        await pushLocal(userId, merged);
+        if (!cancelled) setSyncing(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [scope, userId, authLoading]);
+
+  // Persist locally on every change, and schedule a debounced cloud push.
   useEffect(() => {
     if (!ready) return;
-    if (firstRender.current) {
-      firstRender.current = false;
+    if (skipNextPersist.current) {
+      skipNextPersist.current = false;
       return;
     }
-    saveStore(store).catch(() => {});
-    syncReminders(store.habits, store.challenges).catch(() => {});
-  }, [store, ready]);
+    const activeScope = scopeRef.current;
+    saveStore(store, activeScope).catch(() => {});
+    syncReminders(store.habits.filter(alive), store.challenges.filter(alive)).catch(() => {});
+
+    if (userId) {
+      if (pushTimer.current) clearTimeout(pushTimer.current);
+      pushTimer.current = setTimeout(() => {
+        setSyncing(true);
+        pushLocal(userId, store).finally(() => setSyncing(false));
+      }, 600);
+    }
+  }, [store, ready, userId]);
 
   const addHabit = useCallback((input: HabitInput) => {
     const h = newHabit(input);
@@ -107,6 +166,7 @@ export function HabitsProvider({ children }: { children: ReactNode }) {
                   : 1,
               reminderTime:
                 patch.reminderTime === undefined ? h.reminderTime : patch.reminderTime,
+              updatedAt: nowIso(),
             }
           : h,
       ),
@@ -114,10 +174,13 @@ export function HabitsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const removeHabit = useCallback((id: string) => {
+    const ts = nowIso();
     setStore((s) => ({
       ...s,
-      habits: s.habits.filter((h) => h.id !== id),
-      challenges: s.challenges.filter((c) => c.habitId !== id),
+      habits: s.habits.map((h) => (h.id === id ? { ...h, deletedAt: ts, updatedAt: ts } : h)),
+      challenges: s.challenges.map((c) =>
+        c.habitId === id ? { ...c, deletedAt: ts, updatedAt: ts } : c,
+      ),
     }));
   }, []);
 
@@ -148,7 +211,9 @@ export function HabitsProvider({ children }: { children: ReactNode }) {
     setStore((s) => ({
       ...s,
       challenges: s.challenges.map((c) =>
-        c.id === id && !c.completedAt ? { ...c, completedAt: todayKey() } : c,
+        c.id === id && !c.completedAt
+          ? { ...c, completedAt: todayKey(), updatedAt: nowIso() }
+          : c,
       ),
     }));
   }, []);
@@ -161,24 +226,24 @@ export function HabitsProvider({ children }: { children: ReactNode }) {
     setStore((s) => ({ ...s, notificationsAsked: v }));
   }, []);
 
-  const getHabit = useCallback(
-    (id: string) => store.habits.find((h) => h.id === id),
-    [store.habits],
-  );
+  const habits = useMemo(() => store.habits.filter(alive), [store.habits]);
+  const challenges = useMemo(() => store.challenges.filter(alive), [store.challenges]);
+
+  const getHabit = useCallback((id: string) => habits.find((h) => h.id === id), [habits]);
 
   const activeChallenge = useMemo(() => {
-    const open = store.challenges.filter((c) => !c.completedAt);
-    if (open.length === 0) return null;
-    return open[0];
-  }, [store.challenges]);
+    const open = challenges.filter((c) => !c.completedAt);
+    return open.length ? open[0] : null;
+  }, [challenges]);
 
   const value: HabitsContextValue = {
     ready,
-    habits: store.habits,
-    challenges: store.challenges,
+    habits,
+    challenges,
     onboardingComplete: store.onboardingComplete,
     notificationsAsked: store.notificationsAsked,
     activeChallenge,
+    syncing,
     addHabit,
     updateHabit,
     removeHabit,

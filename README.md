@@ -2,7 +2,7 @@
 
 A minimalist habit tracker built with Expo and React Native. Track one thing a day or several times a day, commit to a challenge, and unlock a tiered reward badge when you finish.
 
-Every check-in fires a light haptic + a soft synthesized chime + a scale-bounce on the check circle. Everything persists to local storage — no account, no backend.
+Every check-in fires a light haptic + a soft synthesized chime + a scale-bounce on the check circle. Data lives in local storage for an instant, offline-first experience, and syncs to Supabase in the background when you sign in. Runs fully offline with no account if you skip sign-in.
 
 ## Features
 
@@ -43,6 +43,27 @@ Then either:
 | `npx tsc --noEmit -p .` | Type-check                                      |
 | `npm run reset-project` | Move starter template to `app-example/` and blank `src/app/` |
 
+## Cloud sync & auth (Supabase)
+
+Optional. The app runs local-only until you add Supabase credentials; once configured, users can sign up / log in with email + password and their habits sync across devices.
+
+**1. Create a project** at [supabase.com](https://supabase.com) (free tier is fine).
+
+**2. Run the schema.** In the dashboard: SQL Editor → New query → paste `supabase/schema.sql` → Run. This creates the `habits` and `challenges` tables and Row-Level Security policies so each user can only read/write their own rows.
+
+**3. Add credentials.** Copy `.env.example` to `.env` and fill in from Project Settings → API:
+
+```
+EXPO_PUBLIC_SUPABASE_URL=https://your-ref.supabase.co
+EXPO_PUBLIC_SUPABASE_ANON_KEY=your-anon-public-key
+```
+
+The anon key is safe to ship in a client — it's public by design and gated by RLS. **Never** put the `service_role` key here. Restart the dev server after editing `.env` (env vars are inlined at bundle time).
+
+**4. (Optional) turn off email confirmation** for faster demo testing: Authentication → Providers → Email → disable "Confirm email". Otherwise sign-up sends a confirmation link before the first login works.
+
+**How sync works:** AsyncStorage is always the UI's source of truth, so every tap is instant and works offline. Each mutation stamps `updatedAt` and schedules a debounced background upsert to Supabase. On login the app pulls remote rows and merges per-row by `updatedAt` (last-write-wins); deletes are soft (a `deletedAt` tombstone) so they propagate. Local data created before signing in is adopted into the account on first login.
+
 ## Architecture
 
 ```
@@ -61,16 +82,22 @@ src/
   components/             # HabitRow, ChallengeBanner, ConsistencyChart,
                           # BigHeatmap, WeeklyBars, RewardBadge, RewardModal, …
   lib/
-    habits.ts             # types, storage, streak/stat math, v1→v2 migration
-    use-habits.tsx        # HabitsProvider + useHabits() + useChallengeProgress()
+    habits.ts             # types, per-user storage, streak/stat math, v1→v2→v3 migration
+    use-habits.tsx        # HabitsProvider + useHabits() — scope-aware, drives sync
+    supabase.ts           # Supabase client (null when env not configured)
+    auth.tsx              # AuthProvider + useAuth() (email/password, skip-to-offline)
+    sync.ts               # push/pull/merge between local store and Supabase
+    prefs.ts              # tiny device prefs (auth-skipped flag)
     feedback.tsx          # FeedbackProvider (haptic + audio player)
     notifications.ts      # local notifications (guarded against Expo Go)
     time.ts               # 24h ↔ Date ↔ "7:30 PM"
+supabase/
+  schema.sql              # tables + Row-Level Security
   constants/
     theme.ts              # Colors, Fonts, Spacing, Palette type
 ```
 
-State is a single `HabitsProvider` context, persisted to `AsyncStorage` under key `habits.v2`. The provider re-runs `syncReminders(habits, challenges)` after every store change so notification schedules stay in lockstep with data. A one-time migration lifts any legacy `habits.v1` array into the v2 store as binary habits.
+State is a single `HabitsProvider` context, persisted to `AsyncStorage` under a per-user key (`habits.v3.<userId>`, or `habits.v3.local` when signed out). The provider re-runs `syncReminders(habits, challenges)` after every store change so notification schedules stay in lockstep with data, and — when signed in — pushes changes to Supabase. A one-time migration lifts any legacy `habits.v1`/`habits.v2` data into the v3 store.
 
 `FeedbackProvider` owns a single long-lived `AudioPlayer` from `expo-audio` and exposes `fire('tick' | 'complete')`. `tick` is a light haptic only; `complete` is a success haptic + chime seek-to-0 + play.
 

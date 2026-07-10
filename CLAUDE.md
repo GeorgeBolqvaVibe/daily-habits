@@ -46,12 +46,23 @@ Typed routes are **off** (`experiments.typedRoutes: false`) — pass raw strings
 
 Wraps everything in `src/app/_layout.tsx`, in this order:
 
-`ThemeProvider` → `HabitsProvider` → `FeedbackProvider` → `<Stack>` + `RewardWatcher`.
+`ThemeProvider` → `AuthProvider` → `HabitsProvider` → `FeedbackProvider` → `<Stack>` + `RewardWatcher`.
 
-- `HabitsProvider` (`src/lib/use-habits.tsx`) — single source of truth. Loads/saves the whole `Store` (habits + challenges + `onboardingComplete` + `notificationsAsked`) via `loadStore`/`saveStore`. After every store change it also calls `syncReminders(habits, challenges)` so notification schedules stay in lockstep with data.
+Order matters: `HabitsProvider` calls `useAuth()` to know the current user, so `AuthProvider` must be above it.
+
+- `AuthProvider` (`src/lib/auth.tsx`) — Supabase email/password session + a device-local `skipped` flag (offline mode). `enabled` is false when env isn't configured, and everything downstream falls back to local-only.
+- `HabitsProvider` (`src/lib/use-habits.tsx`) — single source of truth for the UI. Loads/saves the whole `Store` per-user via `loadStore(scope)`/`saveStore(store, scope)` where `scope = userId ?? 'local'`. After every store change it calls `syncReminders(...)` and (when signed in) schedules a debounced `pushLocal` to Supabase. Exposes habits/challenges **filtered to non-deleted** (`deletedAt === null`).
 - `FeedbackProvider` (`src/lib/feedback.tsx`) — owns a single `AudioPlayer` instance from `expo-audio` and exposes `fire('tick' | 'complete')`. `tick` = light haptic; `complete` = success haptic + chime seek-to-0 + play.
-- `OnboardingGate` — thin `useEffect` in `_layout.tsx` that consults the store and redirects.
+- `NavGate` — thin `useEffect` in `_layout.tsx` that redirects: to `/auth` when cloud is enabled and the user is neither signed in nor skipped, then to `/onboarding` until `onboardingComplete`.
 - `RewardWatcher` — thin `useEffect` in `_layout.tsx` that scans challenges for `challengeProgress(...).complete`, opens `<RewardModal>` and fires the celebration haptic + chime.
+
+### Cloud sync (Supabase)
+
+- `src/lib/supabase.ts` exports `supabase` (a client, or `null` when `EXPO_PUBLIC_SUPABASE_URL` / `EXPO_PUBLIC_SUPABASE_ANON_KEY` are absent) and `isSupabaseConfigured`. **No env = the whole feature is inert**; the app runs exactly as the pre-Supabase version did.
+- `src/lib/sync.ts` maps `Habit`/`Challenge` ↔ snake_case DB rows, and does `pullRemote` / `pushLocal` (upserts) / `mergeStores` (per-row last-write-wins by `updatedAt`, union by id). Pushing the full current state is idempotent, so retry-after-offline just works.
+- Entities carry `updatedAt` + `deletedAt` (soft delete) for sync — set them on **every** mutation. `nowIso()` in `habits.ts` is the stamp helper. Never hard-`filter` a deleted entity out of the store; set `deletedAt` so the tombstone syncs, and rely on the provider's `alive` filter for display.
+- Storage is per-user: `habits.v3.<userId>` or `habits.v3.local`. `loadStore` folds legacy `habits.v2`/`habits.v1` into `local` once. `onboardingComplete` / `notificationsAsked` are device-local (not synced) — `mergeStores` always keeps the local values.
+- SQL + RLS live in `supabase/schema.sql`; each table has a policy `auth.uid() = user_id`. `.env.example` is the credentials template (the real `.env` is gitignored; `.env.example` is force-un-ignored).
 
 ### Data model (v2)
 

@@ -10,6 +10,7 @@ import { ThemedView } from '@/components/themed-view';
 import { WeeklyBars } from '@/components/weekly-bars';
 import { BottomTabInset, Colors, MaxContentWidth, Palette, Spacing } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useAuth } from '@/lib/auth';
 import { Habit, bestStreak, currentStreak, dayCountsForRange, totalDoneDays } from '@/lib/habits';
 import { useHabits } from '@/lib/use-habits';
 
@@ -17,7 +18,8 @@ export default function HistoryScreen() {
   const router = useRouter();
   const scheme = useColorScheme();
   const palette = Colors[scheme === 'unspecified' ? 'light' : scheme];
-  const { habits, challenges } = useHabits();
+  const { habits, challenges, syncing } = useHabits();
+  const { enabled, email, userId, signOut } = useAuth();
 
   const stats = useMemo(() => {
     const totalCompletions = habits.reduce((s, h) => s + totalDoneDays(h), 0);
@@ -43,6 +45,44 @@ export default function HistoryScreen() {
               Every step counts.
             </ThemedText>
           </View>
+
+          {enabled && (
+            <ThemedView type="backgroundElement" style={styles.account}>
+              <View style={{ flexShrink: 1 }}>
+                {userId ? (
+                  <>
+                    <ThemedText style={{ fontSize: 15, fontWeight: '600' }} numberOfLines={1}>
+                      {email ?? 'Signed in'}
+                    </ThemedText>
+                    <ThemedText type="small" style={{ color: palette.textSecondary }}>
+                      {syncing ? 'Syncing…' : 'Synced to the cloud'}
+                    </ThemedText>
+                  </>
+                ) : (
+                  <>
+                    <ThemedText style={{ fontSize: 15, fontWeight: '600' }}>Offline mode</ThemedText>
+                    <ThemedText type="small" style={{ color: palette.textSecondary }}>
+                      Sign in to back up & sync.
+                    </ThemedText>
+                  </>
+                )}
+              </View>
+              <Pressable
+                onPress={() => (userId ? signOut() : router.push('/auth' as never))}
+                style={({ pressed }) => [
+                  styles.accountBtn,
+                  {
+                    borderColor: palette.backgroundSelected,
+                    backgroundColor: palette.background,
+                    opacity: pressed ? 0.6 : 1,
+                  },
+                ]}>
+                <ThemedText style={{ fontWeight: '600' }}>
+                  {userId ? 'Sign out' : 'Sign in'}
+                </ThemedText>
+              </Pressable>
+            </ThemedView>
+          )}
 
           <View style={styles.statRow}>
             <StatTile value={stats.totalCompletions} label="Completions" palette={palette} />
@@ -205,6 +245,20 @@ const styles = StyleSheet.create({
   scroll: {
     gap: Spacing.three,
     paddingBottom: BottomTabInset + Spacing.four,
+  },
+  account: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.three,
+    padding: Spacing.three,
+    borderRadius: Spacing.three,
+  },
+  accountBtn: {
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderRadius: Spacing.two,
+    borderWidth: 1,
   },
   statRow: {
     flexDirection: 'row',

@@ -12,27 +12,40 @@ import { useColorScheme } from 'react-native';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
 import { RewardModal } from '@/components/reward-modal';
+import { AuthProvider, useAuth } from '@/lib/auth';
 import { challengeProgress } from '@/lib/habits';
 import { FeedbackProvider, useFeedback } from '@/lib/feedback';
 import { HabitsProvider, useHabits } from '@/lib/use-habits';
 
 SplashScreen.preventAutoHideAsync();
 
-function OnboardingGate() {
+function NavGate() {
+  const { enabled, loading: authLoading, userId, skipped } = useAuth();
   const { ready, onboardingComplete } = useHabits();
   const segments = useSegments();
   const router = useRouter();
 
   useEffect(() => {
-    if (!ready) return;
+    if (authLoading || !ready) return;
     const first = segments[0] as string | undefined;
+    const inAuth = first === 'auth';
     const inOnboarding = first === 'onboarding';
+    const needAuth = enabled && !userId && !skipped;
+
+    if (needAuth) {
+      if (!inAuth) router.replace('/auth');
+      return;
+    }
+    if (inAuth) {
+      router.replace('/');
+      return;
+    }
     if (!onboardingComplete && !inOnboarding) {
       router.replace('/onboarding');
     } else if (onboardingComplete && inOnboarding) {
       router.replace('/');
     }
-  }, [ready, onboardingComplete, segments, router]);
+  }, [authLoading, ready, enabled, userId, skipped, onboardingComplete, segments, router]);
 
   return null;
 }
@@ -83,25 +96,25 @@ export default function RootLayout() {
   const colorScheme = useColorScheme();
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <HabitsProvider>
-        <FeedbackProvider>
-          <OnboardingGate />
-          <AnimatedSplashOverlay />
-          <Stack screenOptions={{ headerShown: false }}>
-            <Stack.Screen name="(tabs)" />
-            <Stack.Screen name="onboarding" options={{ gestureEnabled: false }} />
-            <Stack.Screen
-              name="habits/new"
-              options={{ presentation: 'modal', headerShown: true, title: 'New habit' }}
-            />
-            <Stack.Screen
-              name="habits/[id]"
-              options={{ headerShown: true, title: 'Habit' }}
-            />
-          </Stack>
-          <RewardWatcher />
-        </FeedbackProvider>
-      </HabitsProvider>
+      <AuthProvider>
+        <HabitsProvider>
+          <FeedbackProvider>
+            <NavGate />
+            <AnimatedSplashOverlay />
+            <Stack screenOptions={{ headerShown: false }}>
+              <Stack.Screen name="(tabs)" />
+              <Stack.Screen name="auth" options={{ gestureEnabled: false }} />
+              <Stack.Screen name="onboarding" options={{ gestureEnabled: false }} />
+              <Stack.Screen
+                name="habits/new"
+                options={{ presentation: 'modal', headerShown: true, title: 'New habit' }}
+              />
+              <Stack.Screen name="habits/[id]" options={{ headerShown: true, title: 'Habit' }} />
+            </Stack>
+            <RewardWatcher />
+          </FeedbackProvider>
+        </HabitsProvider>
+      </AuthProvider>
     </ThemeProvider>
   );
 }
