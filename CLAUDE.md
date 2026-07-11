@@ -111,6 +111,15 @@ Reward badges (`reward-badge.tsx`) are the most involved SVG: radial gradient ba
 
 Files named `*.web.tsx` / `*.web.ts` replace the base file on web (`animated-icon`, `app-tabs`, `use-color-scheme`). `app-tabs.web.tsx` uses `expo-router/ui` `<Tabs>` — a completely different mechanism from mobile's `<NativeTabs>` — so any change to tab routes/labels has to happen in **both** files.
 
+### AI coaching (Edge Function)
+
+- `supabase/functions/coach/index.ts` is a **Deno** function (single self-contained file so it deploys via CLI/Management API without bundling multiple modules). It's **excluded from the app's tsconfig** (`exclude: ["supabase/functions"]`) — don't try to make it pass the app's tsc; it targets Deno globals (`Deno.serve`, `Deno.env`) and `jsr:` imports.
+- It authenticates the caller by creating a Supabase client scoped to the request's `Authorization` header, so all its queries run **under that user's RLS** — it can only read that user's habits. Never switch it to the service-role key for reads.
+- Secrets on the function: `GEMINI_API_KEY` + `GEMINI_MODEL` (set via `supabase secrets set`). `SUPABASE_URL` / `SUPABASE_ANON_KEY` are auto-injected by the platform — don't set them. The Gemini key lives only as a function secret; it is never in the app bundle or the repo.
+- Model default is `gemini-2.0-flash`. Note SDK-56-era caveat learned the hard way: newer Gemini ids like `gemini-2.5-flash` return 404 "no longer available to new users" for fresh keys, and some keys have free-tier `limit: 0` (429). Verify a key with a direct `generateContent` call before assuming a coaching failure is a code bug.
+- Client side: `src/lib/coach.ts` (`generateInsight` invokes the function, `latestInsight` reads the last stored row) and `src/components/coach-card.tsx` (renders on Today with `kind="nudge"`, on History with `kind="reflection"`). The card returns null unless signed in.
+- `coach_insights` schema is in `supabase/coach.sql` (separate from `schema.sql`); same RLS pattern (`auth.uid() = user_id`).
+
 ## Repo quirks
 
 - `global.css` and `css.d.ts` at the repo root exist to satisfy a stray `@/global.css` import from `constants/theme.ts` and CSS-module type declarations used by `animated-icon.web.tsx`. Don't delete them without checking both.

@@ -64,6 +64,31 @@ The anon key is safe to ship in a client — it's public by design and gated by 
 
 **How sync works:** AsyncStorage is always the UI's source of truth, so every tap is instant and works offline. Each mutation stamps `updatedAt` and schedules a debounced background upsert to Supabase. On login the app pulls remote rows and merges per-row by `updatedAt` (last-write-wins); deletes are soft (a `deletedAt` tombstone) so they propagate. Local data created before signing in is adopted into the account on first login.
 
+## AI coaching (Supabase Edge Functions + Gemini)
+
+Two features, both computed server-side so no LLM key ever ships in the app:
+
+- **Coach nudge** (Today tab) — a short motivational message generated from your streak/consistency data.
+- **Weekly reflection** (History tab) — a short report on how the last week went.
+
+Flow: the app calls the `coach` Edge Function with the user's auth token → the function reads that user's habits/completions under RLS, computes stats, prompts **Gemini** (`gemini-2.0-flash` by default) → stores the result in `coach_insights` and returns it. The cards only appear when signed in.
+
+**Deploy:**
+
+1. Run `supabase/coach.sql` in the SQL Editor (creates `coach_insights` + RLS).
+2. Deploy the function (needs a Supabase access token, no DB password):
+   ```bash
+   SUPABASE_ACCESS_TOKEN=sbp_... npx supabase functions deploy coach --project-ref YOUR_REF
+   ```
+3. Set the model + a Gemini API key as function secrets (server-side only):
+   ```bash
+   SUPABASE_ACCESS_TOKEN=sbp_... npx supabase secrets set \
+     GEMINI_API_KEY=AIza... GEMINI_MODEL=gemini-2.0-flash --project-ref YOUR_REF
+   ```
+   Get a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — it must be a standard AI Studio key (starts with `AIza`) with free-tier quota. `SUPABASE_URL` / `SUPABASE_ANON_KEY` are injected automatically.
+
+To switch models or providers, change `GEMINI_MODEL` (or edit `callGemini` in `supabase/functions/coach/index.ts`).
+
 ## Architecture
 
 ```
