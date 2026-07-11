@@ -1,19 +1,14 @@
 // Supabase Edge Function: "coach"
 //
-// Reads the caller's habits + completions, computes streak/consistency stats,
-// asks Gemini for either a short motivational nudge or a weekly/monthly
-// reflection, stores the result in coach_insights, and returns it.
+// Reads the caller's habits + completions, computes stats, and writes a
+// personalized nudge or reflection into coach_insights. Tries LLM providers
+// in order (Groq → Gemini) and falls back to a stats-driven template so it
+// always works even without an LLM key.
 //
 // Request body: { kind: 'nudge' | 'reflection', period?: 'weekly' | 'monthly' }
-// Auth: the user's Supabase JWT in the Authorization header (sent automatically
-// by supabase.functions.invoke on the client).
-//
-// Self-contained (single file) so it deploys cleanly via the Management API.
+// Auth: the user's Supabase JWT (Bearer) in the Authorization header.
 
 import { createClient } from 'jsr:@supabase/supabase-js@2';
-
-const GEMINI_MODEL = Deno.env.get('GEMINI_MODEL') ?? 'gemini-2.5-flash';
-const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY') ?? '';
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -22,14 +17,14 @@ const cors = {
 };
 
 // ---------------------------------------------------------------------------
-// Stats (operate on raw DB rows: completions = { 'YYYY-MM-DD': count })
+// Stats
 // ---------------------------------------------------------------------------
 
 type HabitRow = {
   id: string;
   name: string;
   emoji: string;
-  type: string; // 'binary' | 'count'
+  type: string;
   target: number;
   completions: Record<string, number>;
 };
@@ -82,7 +77,16 @@ type HabitStat = {
   doneToday: boolean;
 };
 
-function summarize(habits: HabitRow[], windowDays: number) {
+export type Stats = {
+  perHabit: HabitStat[];
+  best: HabitStat | null;
+  worst: HabitStat | null;
+  activeDays: number;
+  windowDays: number;
+  habitCount: number;
+};
+
+function summarize(habits: HabitRow[], windowDays: number): Stats {
   const today = todayKey();
   const perHabit: HabitStat[] = habits.map((h) => ({
     name: h.name,
@@ -92,45 +96,66 @@ function summarize(habits: HabitRow[], windowDays: number) {
     consistency30: consistency(h, 30),
     doneToday: isDone(h, today),
   }));
-
   let activeDays = 0;
   for (let i = 0; i < windowDays; i++) {
     const date = addDays(today, -i);
     if (habits.some((h) => isDone(h, date))) activeDays += 1;
   }
-
   const byConsistency = [...perHabit].sort((a, b) => b.consistency30 - a.consistency30);
-  const best = byConsistency[0] ?? null;
-  const worst = byConsistency[byConsistency.length - 1] ?? null;
-
-  return { perHabit, best, worst, activeDays, windowDays, habitCount: habits.length };
+  return {
+    perHabit,
+    best: byConsistency[0] ?? null,
+    worst: byConsistency[byConsistency.length - 1] ?? null,
+    activeDays,
+    windowDays,
+    habitCount: habits.length,
+  };
 }
 
-type Stats = ReturnType<typeof summarize>;
-
 // ---------------------------------------------------------------------------
-// Gemini
+// LLM providers
 // ---------------------------------------------------------------------------
 
-async function callGemini(prompt: string): Promise<string> {
-  const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+async function callGroq(prompt: string, key: string): Promise<string> {
+  const model = Deno.env.get('GROQ_MODEL') ?? 'llama-3.3-70b-versatile';
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+    body: JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.7,
+      max_tokens: 400,
+    }),
+  });
+  if (!res.ok) throw new Error(`Groq ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const data = await res.json();
+  const text = data?.choices?.[0]?.message?.content;
+  if (!text) throw new Error('Groq returned no text');
+  return String(text).trim();
+}
+
+async function callGemini(prompt: string, key: string): Promise<string> {
+  const model = Deno.env.get('GEMINI_MODEL') ?? 'gemini-2.0-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: { temperature: 0.7, maxOutputTokens: 400 },
     }),
   });
-  if (!res.ok) {
-    throw new Error(`Gemini ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  }
+  if (!res.ok) throw new Error(`Gemini ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const data = await res.json();
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) throw new Error('Gemini returned no text');
-  return text.trim();
+  return String(text).trim();
 }
+
+// ---------------------------------------------------------------------------
+// Prompts + templates (fallback always works, no key required)
+// ---------------------------------------------------------------------------
 
 function nudgePrompt(stats: Stats): string {
   const lines = stats.perHabit
@@ -139,7 +164,7 @@ function nudgePrompt(stats: Stats): string {
         `- ${h.emoji} ${h.name}: ${h.streak}-day streak, ${h.consistency7}% this week, ${h.consistency30}% this month, ${h.doneToday ? 'done today' : 'not done today'}`,
     )
     .join('\n');
-  return `You are a warm, concise habit coach. Based on this user's data, write ONE short motivational message (2-3 sentences, max ~45 words). Celebrate a specific win, gently flag one habit that's slipping, and give one tiny concrete tip. Encouraging tone, at most one emoji. Plain sentences — no markdown headers or lists.
+  return `You are a warm, concise habit coach. Write ONE short motivational message (2-3 sentences, max ~45 words). Celebrate a specific win, gently flag one habit that's slipping, and give one tiny concrete tip. Encouraging tone, at most one emoji. Plain sentences — no markdown headers or lists.
 
 Habits:
 ${lines || '(no habits yet)'}`;
@@ -149,12 +174,89 @@ function reflectionPrompt(stats: Stats, period: string): string {
   const lines = stats.perHabit
     .map((h) => `- ${h.emoji} ${h.name}: ${h.consistency30}% consistent, current streak ${h.streak}`)
     .join('\n');
-  return `You are a thoughtful habit coach writing a ${period} reflection report. Write 3-4 short sentences (max ~90 words). Summarize the last ${stats.windowDays} days: name the habit they were most consistent with and one that dropped off, note active days (${stats.activeDays}/${stats.windowDays}), and end with one forward-looking suggestion. Warm, specific, plain sentences — no markdown headers or bullet lists.
+  return `You are a thoughtful habit coach writing a ${period} reflection. Write 3-4 short sentences (max ~90 words). Summarize the last ${stats.windowDays} days: name the habit they were most consistent with, one that dropped off, note active days (${stats.activeDays}/${stats.windowDays}), and end with one forward-looking suggestion. Warm, plain sentences — no markdown.
 
 Habits (last 30 days):
 ${lines || '(no habits yet)'}
-Most consistent: ${stats.best ? stats.best.name : 'n/a'}
-Least consistent: ${stats.worst ? stats.worst.name : 'n/a'}`;
+Most consistent: ${stats.best?.name ?? 'n/a'}
+Least consistent: ${stats.worst?.name ?? 'n/a'}`;
+}
+
+export function templateNudge(stats: Stats): string {
+  if (stats.habitCount === 0) return "Add your first habit and I'll help you build momentum.";
+  const { best, worst, perHabit, activeDays, windowDays } = stats;
+  const parts: string[] = [];
+
+  if (best && best.streak >= 3) {
+    parts.push(`${best.emoji} ${best.streak}-day streak on ${best.name} — you're crushing it.`);
+  } else if (best && best.consistency7 >= 50) {
+    parts.push(`${best.emoji} ${best.consistency7}% on ${best.name} this week — solid work.`);
+  } else {
+    parts.push(`You've been active on ${activeDays} of the last ${windowDays} days.`);
+  }
+
+  const missing = perHabit.find((h) => !h.doneToday);
+  const slipping =
+    worst && worst.consistency7 < 40 && worst !== best ? worst : null;
+
+  if (slipping) {
+    parts.push(
+      `${slipping.emoji} ${slipping.name} could use a boost — try stacking it right after ${best?.name ?? 'something you already do'} today.`,
+    );
+  } else if (missing) {
+    parts.push(`Don't forget ${missing.emoji} ${missing.name} today. Even two minutes counts.`);
+  } else {
+    parts.push('Everything checked off today — keep the momentum going.');
+  }
+
+  return parts.join(' ');
+}
+
+export function templateReflection(stats: Stats): string {
+  if (stats.habitCount === 0) {
+    return 'No habits tracked yet. Add one to start seeing weekly reflections here.';
+  }
+  const { best, worst, activeDays, windowDays } = stats;
+  const parts: string[] = [];
+  parts.push(`Over the last ${windowDays} days you showed up on ${activeDays} of them.`);
+  if (best) {
+    parts.push(
+      `${best.emoji} ${best.name} was your anchor at ${best.consistency30}% consistency.`,
+    );
+  }
+  if (worst && worst !== best && worst.consistency30 < 50) {
+    parts.push(
+      `${worst.emoji} ${worst.name} dropped off (${worst.consistency30}%) — try a fixed cue for it this week.`,
+    );
+  }
+  parts.push('Aim to nudge your weakest habit up while protecting your longest streak.');
+  return parts.join(' ');
+}
+
+async function generateContent(
+  stats: Stats,
+  kind: 'nudge' | 'reflection',
+  period: 'weekly' | 'monthly',
+): Promise<{ text: string; source: string }> {
+  const prompt = kind === 'reflection' ? reflectionPrompt(stats, period) : nudgePrompt(stats);
+  const groq = Deno.env.get('GROQ_API_KEY');
+  if (groq) {
+    try {
+      return { text: await callGroq(prompt, groq), source: 'groq' };
+    } catch (e) {
+      console.warn('Groq failed, trying next:', String(e).slice(0, 200));
+    }
+  }
+  const gem = Deno.env.get('GEMINI_API_KEY');
+  if (gem) {
+    try {
+      return { text: await callGemini(prompt, gem), source: 'gemini' };
+    } catch (e) {
+      console.warn('Gemini failed, falling back:', String(e).slice(0, 200));
+    }
+  }
+  const text = kind === 'reflection' ? templateReflection(stats) : templateNudge(stats);
+  return { text, source: 'template' };
 }
 
 // ---------------------------------------------------------------------------
@@ -171,12 +273,10 @@ function json(body: unknown, status = 200) {
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
-  if (!GEMINI_API_KEY) return json({ error: 'GEMINI_API_KEY not set' }, 500);
 
   const authHeader = req.headers.get('Authorization') ?? '';
   if (!authHeader.startsWith('Bearer ')) return json({ error: 'Missing auth' }, 401);
 
-  // Client scoped to the caller's JWT so RLS applies to every query.
   const supabase = createClient(
     Deno.env.get('SUPABASE_URL')!,
     Deno.env.get('SUPABASE_ANON_KEY')!,
@@ -191,7 +291,7 @@ Deno.serve(async (req) => {
   try {
     body = await req.json();
   } catch {
-    /* default to nudge */
+    /* default */
   }
   const kind = body.kind === 'reflection' ? 'reflection' : 'nudge';
   const period = body.period === 'monthly' ? 'monthly' : 'weekly';
@@ -204,14 +304,7 @@ Deno.serve(async (req) => {
   if (habitsErr) return json({ error: habitsErr.message }, 500);
 
   const stats = summarize((habits ?? []) as HabitRow[], windowDays);
-
-  let content: string;
-  try {
-    const prompt = kind === 'reflection' ? reflectionPrompt(stats, period) : nudgePrompt(stats);
-    content = await callGemini(prompt);
-  } catch (e) {
-    return json({ error: String(e) }, 502);
-  }
+  const { text, source } = await generateContent(stats, kind, period);
 
   const { data: inserted, error: insErr } = await supabase
     .from('coach_insights')
@@ -219,18 +312,19 @@ Deno.serve(async (req) => {
       user_id: userId,
       kind,
       period: kind === 'reflection' ? period : null,
-      content,
+      content: text,
       stats: {
         habitCount: stats.habitCount,
         activeDays: stats.activeDays,
         windowDays: stats.windowDays,
         best: stats.best?.name ?? null,
         worst: stats.worst?.name ?? null,
+        source,
       },
     })
     .select()
     .single();
   if (insErr) return json({ error: insErr.message }, 500);
 
-  return json({ insight: inserted });
+  return json({ insight: inserted, source });
 });

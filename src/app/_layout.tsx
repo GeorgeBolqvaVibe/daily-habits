@@ -15,9 +15,19 @@ import { RewardModal } from '@/components/reward-modal';
 import { AuthProvider, useAuth } from '@/lib/auth';
 import { challengeProgress } from '@/lib/habits';
 import { FeedbackProvider, useFeedback } from '@/lib/feedback';
+import { registerPushToken } from '@/lib/push';
 import { HabitsProvider, useHabits } from '@/lib/use-habits';
 
 SplashScreen.preventAutoHideAsync();
+
+function PushRegistrar() {
+  const { userId } = useAuth();
+  useEffect(() => {
+    if (!userId) return;
+    registerPushToken(userId).catch(() => {});
+  }, [userId]);
+  return null;
+}
 
 function NavGate() {
   const { enabled, loading: authLoading, userId, skipped } = useAuth();
@@ -100,6 +110,7 @@ export default function RootLayout() {
         <HabitsProvider>
           <FeedbackProvider>
             <NavGate />
+            <PushRegistrar />
             <AnimatedSplashOverlay />
             <Stack screenOptions={{ headerShown: false }}>
               <Stack.Screen name="(tabs)" />

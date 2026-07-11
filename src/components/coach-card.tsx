@@ -15,9 +15,18 @@ type Props = {
   cta: string;
   /** Number of habits — the coach needs data to say anything useful. */
   habitCount: number;
+  /** Hours before we auto-regenerate on mount. Null disables auto-cadence. */
+  autoRefreshAfterHours?: number | null;
 };
 
-export function CoachCard({ kind, period, title, cta, habitCount }: Props) {
+export function CoachCard({
+  kind,
+  period,
+  title,
+  cta,
+  habitCount,
+  autoRefreshAfterHours = 6,
+}: Props) {
   const scheme = useColorScheme();
   const palette = Colors[scheme === 'unspecified' ? 'light' : scheme];
   const { enabled, userId } = useAuth();
@@ -26,19 +35,34 @@ export function CoachCard({ kind, period, title, cta, habitCount }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Load-then-maybe-refresh whenever the tab is opened for this signed-in user.
   useEffect(() => {
     let cancelled = false;
-    if (userId) {
-      latestInsight(kind).then((i) => {
-        if (!cancelled) setInsight(i);
-      });
-    } else {
+    if (!userId) {
       setInsight(null);
+      return;
     }
+    (async () => {
+      const latest = await latestInsight(kind);
+      if (cancelled) return;
+      setInsight(latest);
+      if (habitCount === 0) return;
+      const stale =
+        !latest ||
+        (autoRefreshAfterHours != null &&
+          Date.now() - new Date(latest.created_at).getTime() >
+            autoRefreshAfterHours * 3600 * 1000);
+      if (!stale) return;
+      setLoading(true);
+      const { insight: fresh } = await generateInsight(kind, period);
+      if (cancelled) return;
+      setLoading(false);
+      if (fresh) setInsight(fresh);
+    })();
     return () => {
       cancelled = true;
     };
-  }, [userId, kind]);
+  }, [userId, kind, period, habitCount, autoRefreshAfterHours]);
 
   // Only relevant when signed into cloud sync.
   if (!enabled || !userId) return null;
