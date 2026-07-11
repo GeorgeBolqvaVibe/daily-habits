@@ -3,6 +3,7 @@ import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ChallengeBanner } from '@/components/challenge-banner';
+import { CoachCard } from '@/components/coach-card';
 import { HabitRow } from '@/components/habit-row';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -66,6 +67,15 @@ export default function TodayScreen() {
             <ChallengeBanner
               challenge={activeChallenge}
               onPress={() => router.push('/challenges' as never)}
+            />
+          )}
+
+          {ready && (
+            <CoachCard
+              kind="nudge"
+              title="Coach"
+              cta="Get tip"
+              habitCount={habits.length}
             />
           )}
 

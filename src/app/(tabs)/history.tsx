@@ -4,6 +4,7 @@ import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { BigHeatmap } from '@/components/big-heatmap';
+import { CoachCard } from '@/components/coach-card';
 import { RewardBadge } from '@/components/reward-badge';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -89,6 +90,14 @@ export default function HistoryScreen() {
             <StatTile value={stats.longest} label="Best streak" palette={palette} />
             <StatTile value={stats.rewards} label="Rewards" palette={palette} />
           </View>
+
+          <CoachCard
+            kind="reflection"
+            period="weekly"
+            title="Weekly reflection"
+            cta="Generate"
+            habitCount={habits.length}
+          />
 
           <ThemedView type="backgroundElement" style={styles.card}>
             <BigHeatmap habits={habits} />
